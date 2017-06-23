@@ -1,178 +1,231 @@
-# Main Dynasty Class
+(function() {
+  var Dynasty, Promise, Table, aws, debug, https, lib, typeToAwsType, _,
+    __bind = function(fn, me){ return function(){ return fn.apply(me, arguments); }; };
 
-aws = require('aws-sdk')
-_ = require('lodash')
-Promise = require('bluebird')
-debug = require('debug')('dynasty')
-https = require('https')
+  aws = require('aws-sdk');
 
-# See http://vq.io/19EiASB
-typeToAwsType =
-  string: 'S'
-  string_set: 'SS'
-  number: 'N'
-  number_set: 'NS'
-  binary: 'B'
-  binary_set: 'BS'
+  _ = require('lodash');
 
-lib = require('./lib')
-Table = lib.Table
+  Promise = require('bluebird');
 
-class Dynasty
+  debug = require('debug')('dynasty');
 
-  constructor: (credentials, url) ->
-    debug "dynasty constructed."
-    credentials.region = credentials.region || 'us-east-1'
+  https = require('https');
 
-    # Lock API version
-    credentials.apiVersion = '2012-08-10'
+  typeToAwsType = {
+    string: 'S',
+    string_set: 'SS',
+    number: 'N',
+    number_set: 'NS',
+    binary: 'B',
+    binary_set: 'BS'
+  };
 
-    if url and _.isString url
-      debug "connecting to local dynamo at #{url}"
-      credentials.endpoint = new aws.Endpoint url
+  lib = require('./lib');
 
-    @dynamo = new aws.DynamoDB credentials
-    Promise.promisifyAll @dynamo
-    @name = 'Dynasty'
-    @tables = {}
+  Table = lib.Table;
 
-  loadAllTables: =>
-    @list()
-      .then (data) =>
-        for tableName in data.TableNames
-          @table(tableName)
-        return @tables
+  Dynasty = (function() {
+    function Dynasty(credentials, url) {
+      this.loadAllTables = __bind(this.loadAllTables, this);
+      debug("dynasty constructed.");
+      credentials.region = credentials.region || 'us-east-1';
+      credentials.apiVersion = '2012-08-10';
+      if (url && _.isString(url)) {
+        debug("connecting to local dynamo at " + url);
+        credentials.endpoint = new aws.Endpoint(url);
+      }
+      this.dynamo = new aws.DynamoDB(credentials);
+      Promise.promisifyAll(this.dynamo);
+      this.name = 'Dynasty';
+      this.tables = {};
+    }
 
-  # Given a name, return a Table object
-  table: (name) ->
-    @tables[name] = @tables[name] || new Table this, name
+    Dynasty.prototype.loadAllTables = function() {
+      return this.list().then((function(_this) {
+        return function(data) {
+          var tableName, _i, _len, _ref;
+          _ref = data.TableNames;
+          for (_i = 0, _len = _ref.length; _i < _len; _i++) {
+            tableName = _ref[_i];
+            _this.table(tableName);
+          }
+          return _this.tables;
+        };
+      })(this));
+    };
 
-  ###
-  Table Operations
-  ###
+    Dynasty.prototype.table = function(name) {
+      return this.tables[name] = this.tables[name] || new Table(this, name);
+    };
 
-  # Alter an existing table. Wrapper around AWS updateTable
-  alter: (name, params, callback) ->
-    debug "alter() - #{name}, #{JSON.stringify(params, null, 4)}"
-    # We'll accept either an object with a key of throughput or just
-    # an object with the throughput info
-    throughput = params.throughput || params
 
-    awsParams =
-      TableName: name
-      ProvisionedThroughput:
-        ReadCapacityUnits: throughput.read
-        WriteCapacityUnits: throughput.write
+    /*
+    Table Operations
+     */
 
-    @dynamo.updateTableAsync(awsParams).nodeify(callback)
+    Dynasty.prototype.alter = function(name, params, callback) {
+      var awsParams, throughput;
+      debug("alter() - " + name + ", " + (JSON.stringify(params, null, 4)));
+      throughput = params.throughput || params;
+      awsParams = {
+        TableName: name,
+        ProvisionedThroughput: {
+          ReadCapacityUnits: throughput.read,
+          WriteCapacityUnits: throughput.write
+        }
+      };
+      return this.dynamo.updateTableAsync(awsParams).nodeify(callback);
+    };
 
-  # Create a new table. Wrapper around AWS createTable
-  create: (name, params, callback = null) ->
-    debug "create() - #{name}, #{JSON.stringify(params, null, 4)}"
-    throughput = params.throughput || {read: 10, write: 5}
-
-    keySchema = [
-      KeyType: 'HASH'
-      AttributeName: params.key_schema.hash[0]
-    ]
-
-    attributeDefinitions = [
-      AttributeName: params.key_schema.hash[0]
-      AttributeType: typeToAwsType[params.key_schema.hash[1]]
-    ]
-
-    if params.key_schema.range?
-      keySchema.push
-        KeyType: 'RANGE',
-        AttributeName: params.key_schema.range[0]
-      attributeDefinitions.push
-        AttributeName: params.key_schema.range[0]
-        AttributeType: typeToAwsType[params.key_schema.range[1]]
-
-    awsParams =
-      AttributeDefinitions: attributeDefinitions
-      TableName: name
-      KeySchema: keySchema
-      ProvisionedThroughput:
-        ReadCapacityUnits: throughput.read
-        WriteCapacityUnits: throughput.write
-
-    # Add GlobalSecondaryIndexes to awsParams if provided
-    if params.global_secondary_indexes?
-      awsParams.GlobalSecondaryIndexes = []
-      # Verify valid GSI
-      for index in params.global_secondary_indexes
-        key_schema = index.key_schema
-        # Must provide hash type
-        unless key_schema.hash?
-          throw TypeError 'Missing hash index for GlobalSecondaryIndex'
-        typesProvided = Object.keys(key_schema).length
-        # Provide 1-2 types for GSI
-        if typesProvided.length > 2 or typesProvided.length < 1
-          throw RangeError 'Expected one or two types for GlobalSecondaryIndex'
-        # Providing 2 types but the second isn't range type
-        if typesProvided.length is 2 and not key_schema.range?
-          throw TypeError 'Two types provided but the second isn\'t range'
-      # Push each index
-      for index in params.global_secondary_indexes
-        keySchema = []
-        for type, keys of index.key_schema
-          keySchema.push({
-            AttributeName: key[0]
-            KeyType: type.toUpperCase()
-          }) for key in keys
-        awsParams.GlobalSecondaryIndexes.push {
-          IndexName: index.index_name
-          KeySchema: keySchema
-          Projection:
-            ProjectionType: index.projection_type.toUpperCase()
-          # Use the provided or default throughput
-          ProvisionedThroughput: unless index.provisioned_throughput? then awsParams.ProvisionedThroughput else {
-            ReadCapacityUnits: index.provisioned_throughput.read
-            WriteCapacityUnits: index.provisioned_throughput.write
+    Dynasty.prototype.create = function(name, params, callback) {
+      var attributeDefinitions, awsParams, index, key, KeySchema, key_schema, IndexName, keys, throughput, type, typesProvided, _i, _j, _k, _l, _len, _len1, _len2, _len3, _ref, _ref1, _ref2, _ref3;
+      if (callback == null) {
+        callback = null;
+      }
+      debug("create() - " + name + ", " + (JSON.stringify(params, null, 4)));
+      throughput = params.throughput || {
+        read: 10,
+        write: 5
+      };
+      KeySchema = [
+        {
+          KeyType: 'HASH',
+          AttributeName: params.key_schema.hash[0]
+        }
+      ];
+      attributeDefinitions = [
+        {
+          AttributeName: params.key_schema.hash[0],
+          AttributeType: typeToAwsType[params.key_schema.hash[1]]
+        }
+      ];
+      if (params.key_schema.range != null) {
+        KeySchema.push({
+          KeyType: 'RANGE',
+          AttributeName: params.key_schema.range[0]
+        });
+        attributeDefinitions.push({
+          AttributeName: params.key_schema.range[0],
+          AttributeType: typeToAwsType[params.key_schema.range[1]]
+        });
+      }
+      awsParams = {
+        AttributeDefinitions: attributeDefinitions,
+        TableName: name,
+        KeySchema: KeySchema,
+        ProvisionedThroughput: {
+          ReadCapacityUnits: throughput.read,
+          WriteCapacityUnits: throughput.write
+        }
+      };
+      if (params.global_secondary_indexes != null) {
+        awsParams.GlobalSecondaryIndexes = [];
+        _ref = params.global_secondary_indexes;
+        for (_i = 0, _len = _ref.length; _i < _len; _i++) {
+          index = _ref[_i];
+          key_schema = index.key_schema;
+          if (key_schema.hash == null) {
+            throw TypeError('Missing hash index for GlobalSecondaryIndex');
+          }
+          typesProvided = Object.keys(key_schema).length;
+          if (typesProvided.length > 2 || typesProvided.length < 1) {
+            throw RangeError('Expected one or two types for GlobalSecondaryIndex');
+          }
+          if (typesProvided.length === 2 && (key_schema.range == null)) {
+            throw TypeError('Two types provided but the second isn\'t range');
           }
         }
-        # Add key name to attributeDefinitions
-        for type, keys of index.key_schema
-          for key in keys
-            awsParams.AttributeDefinitions.push {
-              AttributeName: key[0]
-              AttributeType: typeToAwsType[key[1]]
+        _ref1 = params.global_secondary_indexes;
+        for (_j = 0, _len1 = _ref1.length; _j < _len1; _j++) {
+          _ref2 = index.key_schema;
+          KeySchema = [
+              {
+                  KeyType: 'HASH',
+                  AttributeName: _ref2.hash[0]
+              }
+          ];
+          attributeDefinitions.push({
+              AttributeName: _ref2.hash[0],
+              AttributeType: typeToAwsType[_ref2.hash[1]]
+          });
+          IndexName = _ref2.hash[0] + '-index'; 
+          if (params.key_schema.range != null) {
+              KeySchema.push({
+                  KeyType: 'RANGE',
+                  AttributeName: _ref2.range[0]
+              });
+              if( ! _.contains(attributeDefinitions.map(function(item) { return item["AttributeName"]; }), _ref2.range[0]) ) {
+                  attributeDefinitions.push({
+                      AttributeName: _ref2.range[0],
+                      AttributeType: typeToAwsType[_ref2.range[1]]
+                  });
+              }
+              IndexName = _ref2.hash[0] + '-' + _ref2.range[0] + '-index';
+          }
+          awsParams.GlobalSecondaryIndexes.push({
+            IndexName: IndexName,
+            KeySchema: KeySchema,
+            Projection: {
+              NonKeyAttributes: index.projection.non_key_attributes,
+              ProjectionType: index.projection.projection_type.toUpperCase()
+            },
+            ProvisionedThroughput: index.provisioned_throughput == null ? awsParams.ProvisionedThroughput : {
+              ReadCapacityUnits: index.provisioned_throughput.read,
+              WriteCapacityUnits: index.provisioned_throughput.write
             }
+          });
+        }
+      }
+      debug("creating table with params " + (JSON.stringify(awsParams, null, 4)));
+      return this.dynamo.createTableAsync(awsParams).nodeify(callback);
+    };
 
-    debug "creating table with params #{JSON.stringify(awsParams, null, 4)}"
+    Dynasty.prototype.describe = function(name, callback) {
+      debug("describe() - " + name);
+      return this.dynamo.describeTableAsync({
+        TableName: name
+      }).nodeify(callback);
+    };
 
-    @dynamo.createTableAsync(awsParams).nodeify(callback)
+    Dynasty.prototype.drop = function(name, callback) {
+      var params;
+      if (callback == null) {
+        callback = null;
+      }
+      debug("drop() - " + name);
+      params = {
+        TableName: name
+      };
+      return this.dynamo.deleteTableAsync(params).nodeify(callback);
+    };
 
-  # describe
-  describe: (name, callback) ->
-    debug "describe() - #{name}"
-    @dynamo.describeTableAsync(TableName: name).nodeify(callback)
+    Dynasty.prototype.list = function(params, callback) {
+      var awsParams;
+      debug("list() - " + params);
+      awsParams = {};
+      if (params !== null) {
+        if (_.isString(params)) {
+          awsParams.ExclusiveStartTableName = params;
+        } else if (_.isFunction(params)) {
+          callback = params;
+        } else if (_.isObject(params)) {
+          if (params.limit === !null) {
+            awsParams.Limit = params.limit;
+          } else if (params.start === !null) {
+            awsParams.ExclusiveStartTableName = params.start;
+          }
+        }
+      }
+      return this.dynamo.listTablesAsync(awsParams).nodeify(callback);
+    };
 
-  # Drop a table. Wrapper around AWS deleteTable
-  drop: (name, callback = null) ->
-    debug "drop() - #{name}"
-    params =
-      TableName: name
+    return Dynasty;
 
-    @dynamo.deleteTableAsync(params).nodeify(callback)
+  })();
 
-  # List tables. Wrapper around AWS listTables
-  list: (params, callback) ->
-    debug "list() - #{params}"
-    awsParams = {}
+  module.exports = function(credentials, url) {
+    return new Dynasty(credentials, url);
+  };
 
-    if params isnt null
-      if _.isString params
-        awsParams.ExclusiveStartTableName = params
-      else if _.isFunction params
-        callback = params
-      else if _.isObject params
-        if params.limit is not null
-          awsParams.Limit = params.limit
-        else if params.start is not null
-          awsParams.ExclusiveStartTableName = params.start
-
-    @dynamo.listTablesAsync(awsParams).nodeify(callback)
-
-module.exports = (credentials, url) -> new Dynasty(credentials, url)
+}).call(this);
